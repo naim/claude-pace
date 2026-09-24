@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claude Code statusline plugin
 # Line1: model (ctx) effort | project (branch) Nf +A -D
-# Line2: bar PCT% CL | 5h used% [⇡⇣pace] countdown  7d used% [⇡⇣pace] countdown
+# Line2: bar PCT% CL | 5h used% [⇡⇣pace] countdown  7d used% [⇡⇣pace] countdown  [$cost]  [C cache]
 
 # Disable glob expansion so unquoted vars with wildcards (e.g. DIR paths)
 # are never accidentally expanded into filename lists.
@@ -17,9 +17,9 @@ command -v jq >/dev/null || {
 }
 
 # ── Colors & Utilities ──
-# C=Cyan G=Green Y=Yellow R=Red D=Dim N=Normal (reset)
+# C=Cyan G=Green Y=Yellow R=Red B=Blue D=Dim N=Normal (reset)
 # Store real escape bytes so final output does not need echo -e interpretation.
-C=$'\033[36m' G=$'\033[32m' Y=$'\033[33m' R=$'\033[31m' D=$'\033[2m' N=$'\033[0m'
+C=$'\033[36m' G=$'\033[32m' Y=$'\033[33m' R=$'\033[31m' B=$'\033[34m' D=$'\033[2m' N=$'\033[0m'
 # Cache records use ASCII Unit Separator so legal Git ref names cannot split
 # serialized fields and empty values survive round-trips through read.
 SEP=$'\037'
@@ -108,14 +108,16 @@ done
 _stale() { [ ! -f "$1" ] || [ $((NOW - $(stat -f%m "$1" 2>/dev/null || stat -c%Y "$1" 2>/dev/null || echo 0))) -gt "$2" ]; }
 
 # ── Parse stdin + settings in one jq call ──
-# Fields: MODEL DIR PCT CTX COST EFF HAS_RL U5 U7 R5 R7 TIN
+# Fields: MODEL DIR PCT CTX COST EFF HAS_RL U5 U7 R5 R7 TIN PCO PCX PCR
+# Every field must emit a value, never an empty string: tab is IFS whitespace,
+# so read collapses an empty field and shifts every later variable left.
 # Read settings into a shell var rather than process substitution so the jq
 # --argjson path works on Windows Git Bash (where /proc/<pid>/fd/N used by
 # <(...) is unavailable and --slurpfile silently fails, yielding empty fields).
 HAS_RL=0
 _SETTINGS=$(cat "$HOME/.claude/settings.json" 2>/dev/null)
 echo "$_SETTINGS" | jq -e . >/dev/null 2>&1 || _SETTINGS='{}'
-IFS=$'\t' read -r MODEL DIR PCT CTX COST EFF HAS_RL U5 U7 R5 R7 TIN < <(
+IFS=$'\t' read -r MODEL DIR PCT CTX COST EFF HAS_RL U5 U7 R5 R7 TIN PCO PCX PCR < <(
   jq -r --argjson cfg "$_SETTINGS" \
     '[(.model.display_name//"?"),(.workspace.project_dir//"."|gsub("\\\\";"/")),
     (.context_window.used_percentage//0|floor),(.context_window.context_window_size//0),
@@ -126,7 +128,10 @@ IFS=$'\t' read -r MODEL DIR PCT CTX COST EFF HAS_RL U5 U7 R5 R7 TIN < <(
     (.rate_limits.seven_day.used_percentage//null|if type=="number" then floor else "--" end),
     (.rate_limits.five_hour.resets_at//0),
     (.rate_limits.seven_day.resets_at//0),
-    (if (.context_window.total_input_tokens|type)=="number" then (.context_window.total_input_tokens|floor) else -1 end)]|@tsv' <<<"$input"
+    (if (.context_window.total_input_tokens|type)=="number" then (.context_window.total_input_tokens|floor) else -1 end),
+    (if .prompt_cache.caching_observed == true then 1 else 0 end),
+    (.prompt_cache.expires_at|if type=="number" then floor else 0 end),
+    (.prompt_cache.recache_tokens_if_cold|if type=="number" then floor else -1 end)]|@tsv' <<<"$input"
 )
 case "${EFF:-default}" in low) EF='low' ;; high) EF='high' ;; xhigh) EF='xhigh' ;; max) EF='max' ;; *) EF='medium' ;; esac
 
@@ -224,9 +229,8 @@ elif [[ "$IS_WT" == "1" ]]; then
 fi
 
 # Usage data: read stdin rate_limits when available. When absent we show
-# placeholders and the session cost instead of falling back to a possibly stale
-# (or wrong-account) cached snapshot. See docs/decisions/2026-05-20-quota-cache-removal.md.
-SHOW_COST=0
+# placeholders instead of falling back to a possibly stale (or wrong-account)
+# cached snapshot. See docs/decisions/2026-05-20-quota-cache-removal.md.
 if [[ "$HAS_RL" == "1" ]]; then
   # Stdin path: real-time, no network. U5/U7 already set by jq read above.
   # Guard: resets_at=0 means field missing, leave RM empty so _usage skips it.
@@ -234,7 +238,6 @@ if [[ "$HAS_RL" == "1" ]]; then
   RM7=$(_minutes_until "$R7")
 else
   U5="--" U7="--" RM5="" RM7=""
-  SHOW_COST=1
 fi
 
 # Combined usage formatter: used% [pace delta] (countdown)
@@ -282,10 +285,29 @@ L1="${C}${MODEL} ${EF}${N}${PAD1} ${D}|${N}  ${L1R}"
 
 # Line 2: bar pct% CL | 5h used% ...  7d used% ...
 L2="${BC}${BAR}${N} ${PCT}% ${CL}${PAD2} ${D}|${N}  5h $(_usage "$U5" "$RM5" 300)  7d $(_usage "$U7" "$RM7" 10080)"
-# Session cost: only when usage data is unavailable in stdin.
-if [[ "$SHOW_COST" == "1" ]]; then
-  printf -v _CS "\$%.2f" "$COST" 2>/dev/null
-  [[ "$_CS" != "\$0.00" ]] && L2+="  $_CS"
+# Session cost at list price, hidden until the session has spent something.
+printf -v _CS "\$%.2f" "$COST" 2>/dev/null
+[[ "$_CS" != "\$0.00" ]] && L2+="  $_CS"
+# Prompt cache: minutes until the cached prefix goes cold (rounded up, so it never
+# reads 0m while warm), or once cold, the tokens the next request re-caches.
+# Expiry is judged from expires_at against the clock, not the warm flag, which is
+# a snapshot from the last event. Hidden until CC has seen caching this session.
+if [[ "$PCO" == "1" ]]; then
+  if [[ "$PCX" =~ ^[0-9]+$ ]] && ((PCX > NOW)); then
+    L2+="  C ${D}$(((PCX - NOW + 59) / 60))m${N}"
+  else
+    _PC="cold"
+    if [[ "$PCR" =~ ^[0-9]+$ ]]; then
+      if ((PCR >= 1000000)); then
+        _PC+=" ↻$((PCR / 1000000)).$((PCR % 1000000 / 100000))M"
+      elif ((PCR >= 1000)); then
+        _PC+=" ↻$((PCR / 1000))k"
+      else
+        _PC+=" ↻${PCR}"
+      fi
+    fi
+    L2+="  C ${B}${_PC}${N}"
+  fi
 fi
 
 printf '%s\n' "$L1"

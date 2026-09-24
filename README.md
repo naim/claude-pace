@@ -10,6 +10,7 @@ If you are searching for a Claude Code statusline, a Claude Code quota monitor, 
 
 - Claude Code status line with `5h` and `7d` quota usage, reset countdowns, and pace delta
 - Pace-aware rate limit tracking, `⇡15%` means overspending, `⇣15%` means headroom
+- Session cost and prompt cache state, `C 42m` until it goes cold, `C cold ↻380k` once it has
 - Pure Bash + jq, single file, no Node.js runtime and no lockfile churn
 - Install as a Claude Code plugin, with `npx`, or as a single script
 
@@ -18,6 +19,8 @@ Most statuslines show "you used 60%." That number means nothing without context.
 - **⇣15%** green = you've used 15% less than expected. Headroom. Keep going.
 - **⇡15%** red = you're burning 15% faster than sustainable. Slow down.
 - **15%** / **20%** = used in the 5h and 7d windows. **3h** = resets in 3 hours.
+- **$12.40** = session cost, estimated at API list price. On Pro and Max this is not what you are billed.
+- **C 42m** = the prompt cache stays warm for 42 more minutes. **C cold ↻380k** (blue) = it has expired, and your next message re-caches 380k tokens. Requires Claude Code `2.1.251+`.
 - Top line: model, effort, project `(branch)`, `3f +24 -7` = git diff stats
 
 Claude Code supports custom status lines through its `statusLine` setting and `/statusline` workflow in the official docs:
@@ -121,15 +124,28 @@ Need themes, powerline aesthetics, or TUI config? Try [ccstatusline](https://git
 
 ## How Claude Pace Tracks Quota
 
-Claude Code polls the statusline every ~300ms:
+Each time Claude Code runs the status line, claude-pace reads:
 
 | Data | Source | Cache |
 |------|--------|-------|
 | Model, context, cost | stdin JSON (single `jq` call) | None needed |
 | Quota (5h, 7d, pace) | stdin `rate_limits` (live, no fallback) | None |
+| Prompt cache | stdin `prompt_cache` | None |
 | Git branch + diff | `git` commands | Private cache dir, 5s TTL |
 
-Requires Claude Code `2.1.80+`, where `rate_limits` is available in statusline stdin. When stdin omits `rate_limits` (older Claude Code, or providers that do not surface the field), claude-pace shows `--` for 5h/7d quota and the session cost if available. No cached or stale quota is ever shown, because a cached account-level snapshot cannot be proven to belong to the current provider/account.
+Claude Code re-runs the status line on events (a new message, a mode change, a rate-limit reset, the prompt cache expiring), not on a timer, so the countdowns hold still while you are idle. To keep them current, add `refreshInterval` (in seconds) to your `statusLine` block:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "refreshInterval": 60
+  }
+}
+```
+
+Requires Claude Code `2.1.80+`, where `rate_limits` is available in statusline stdin. When stdin omits `rate_limits` (older Claude Code, or providers that do not surface the field), claude-pace shows `--` for 5h/7d quota. No cached or stale quota is ever shown, because a cached account-level snapshot cannot be proven to belong to the current provider/account.
 
 Git cache files live in a private per-user directory (`$XDG_RUNTIME_DIR/claude-pace` or `~/.cache/claude-pace`, mode 700). All cache reads are validated before use. No files are ever written to shared `/tmp`.
 
@@ -142,7 +158,7 @@ No. Only `jq` (available via `brew install jq` or your package manager). No npm,
 claude-pace compares your current usage percentage to the fraction of time elapsed in each window (5-hour and 7-day). If you've used 40% of your quota but only 30% of the time has passed, the pace delta shows ⇡10% (red, burning too fast). If you've used 30% with 40% of time elapsed, it shows ⇣10% (green, headroom).
 
 **Does it make network calls?**
-No. Quota data comes from stdin `rate_limits` on Claude Code `2.1.80+`. If `rate_limits` is absent (older Claude Code, or providers that omit it), claude-pace shows `--` for 5h/7d and the local session cost when present. No stale quota fallback — see [the removal decision](docs/decisions/2026-05-20-quota-cache-removal.md).
+No. Quota data comes from stdin `rate_limits` on Claude Code `2.1.80+`. If `rate_limits` is absent (older Claude Code, or providers that omit it), claude-pace shows `--` for 5h/7d. No stale quota fallback — see [the removal decision](docs/decisions/2026-05-20-quota-cache-removal.md).
 
 **Can I inspect the source?**
 The entire tool is [one Bash file](claude-pace.sh). Read it before you install it.

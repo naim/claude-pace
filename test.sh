@@ -385,14 +385,14 @@ assert_line "null rate_limits shows 5h --" 2 '5h --'
 assert_line "null rate_limits shows 7d --" 2 '7d --'
 assert_line "null rate_limits shows session cost" 2 '\$1\.23'
 
-# ── Test 23: Empty-object rate_limits treated as partial live (placeholders, no cost) ──
+# ── Test 23: Empty-object rate_limits treated as partial live (placeholders + cost) ──
 # rate_limits:{} means CC sent the field but with no contents — handled as partial
-# live data, not as "rate_limits absent". Cost stays suppressed because HAS_RL=1.
+# live data, not as "rate_limits absent". Cost shows regardless of rate_limits.
 echo "Test 23: empty-object rate_limits treated as partial live"
 OUTPUT=$(run_with_env "$NULL_HOME" "$NULL_RUNTIME" '{"model":{"display_name":"Opus 4.6"},"workspace":{"project_dir":"'"$PWD"'"},"context_window":{"used_percentage":20,"context_window_size":200000},"cost":{"total_cost_usd":1.23},"rate_limits":{}}')
 assert_line "empty-object rate_limits shows 5h --" 2 '5h --'
 assert_line "empty-object rate_limits shows 7d --" 2 '7d --'
-assert_line_not "empty-object rate_limits suppresses session cost" 2 '\$1\.23'
+assert_line "empty-object rate_limits shows session cost" 2 '\$1\.23'
 
 # ── Test 24: Partial live (only seven_day) renders 5h -- and live 7d ──
 echo "Test 24: partial live (only seven_day) renders 5h -- and live 7d"
@@ -402,7 +402,7 @@ mkdir -p "$PARTIAL_HOME" "$PARTIAL_RUNTIME"
 OUTPUT=$(run_with_env "$PARTIAL_HOME" "$PARTIAL_RUNTIME" '{"model":{"display_name":"Opus 4.6"},"workspace":{"project_dir":"'"$PWD"'"},"context_window":{"used_percentage":20,"context_window_size":200000},"cost":{"total_cost_usd":1.23},"rate_limits":{"seven_day":{"used_percentage":18,"resets_at":'"$((NOW + 400000))"'}}}')
 assert_line "partial live missing five_hour renders 5h --" 2 '5h --'
 assert_line "partial live keeps live seven_day" 2 '7d 18%'
-assert_line_not "live rate_limits suppresses session cost" 2 '\$1\.23'
+assert_line "partial live rate_limits shows session cost" 2 '\$1\.23'
 
 # ── Test 25: Effort level words for all five levels ──
 echo "Test 25: effort level words"
@@ -578,6 +578,75 @@ OUTPUT=$(jq -n --arg d 'C:\Users\alice\projects\my-app' '{model:{display_name:"O
 assert_line "windows path shows project name" 1 '\| +my-app$'
 OUTPUT=$(jq -n --arg d 'C:\Users\alice\projects\my-app\.claude\worktrees\fix-auth' '{model:{display_name:"Opus"},workspace:{project_dir:$d}}' | bash claude-pace.sh 2>/dev/null | strip_ansi)
 assert_line "windows worktree shows repo/worktree" 1 '\| +my-app/fix-auth$'
+
+# ── Test 32: Session cost shows alongside live quota ──
+echo "Test 32: session cost shows alongside live quota"
+COST_HOME="$TEST_TMP/cost-home"
+COST_RUNTIME="$TEST_TMP/cost-runtime"
+mkdir -p "$COST_HOME" "$COST_RUNTIME"
+cost_input() {
+  printf '{"model":{"display_name":"Opus 4.6"},"workspace":{"project_dir":"%s"},"context_window":{"used_percentage":20,"context_window_size":200000},"cost":{"total_cost_usd":%s},"rate_limits":{"five_hour":{"used_percentage":30,"resets_at":%d},"seven_day":{"used_percentage":15,"resets_at":%d}}}' \
+    "$PWD" "$1" "$((NOW + 12000))" "$((NOW + 500000))"
+}
+OUTPUT=$(run_with_env "$COST_HOME" "$COST_RUNTIME" "$(cost_input 12.4)")
+assert_line "live quota shows session cost after 7d" 2 '7d 15%.*  \$12\.40$'
+OUTPUT=$(run_with_env "$COST_HOME" "$COST_RUNTIME" "$(cost_input 0)")
+assert_line_not "zero session cost stays hidden with live quota" 2 '\$'
+
+# ── Test 33: Prompt cache segment shows warm countdown or cold re-cache size ──
+echo "Test 33: prompt cache warm/cold segment"
+PCACHE_HOME="$TEST_TMP/pcache-home"
+PCACHE_RUNTIME="$TEST_TMP/pcache-runtime"
+mkdir -p "$PCACHE_HOME" "$PCACHE_RUNTIME"
+# $1 is the raw prompt_cache JSON value, spliced in verbatim.
+pcache_input() {
+  printf '{"model":{"display_name":"Opus 4.6"},"workspace":{"project_dir":"%s"},"context_window":{"used_percentage":20,"context_window_size":200000},"cost":{"total_cost_usd":12.4},"rate_limits":{"five_hour":{"used_percentage":30,"resets_at":%d},"seven_day":{"used_percentage":15,"resets_at":%d}},"prompt_cache":%s}' \
+    "$PWD" "$((NOW + 12000))" "$((NOW + 500000))" "$1"
+}
+# 2500s = 41.7 min, rounded up so a second of drift between NOW here and in the
+# script can't change the expected value.
+OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":true,"caching_observed":true,"expires_at":'"$((NOW + 2500))"',"recache_tokens_if_cold":380000}')")
+assert_line "warm cache shows minutes to expiry after cost" 2 '\$12\.40  C 42m$'
+assert_aligned "| aligned with cache segment"
+OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":true,"caching_observed":true,"expires_at":'"$((NOW + 30))"',"recache_tokens_if_cold":380000}')")
+assert_line "warm cache under a minute rounds up to 1m" 2 '  C 1m$'
+# CC re-runs the script at expires_at, but the warm flag in that payload is a
+# snapshot; expiry is judged from expires_at against the clock.
+OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":true,"caching_observed":true,"expires_at":'"$((NOW - 10))"',"recache_tokens_if_cold":380000}')")
+assert_line "expired cache reads cold despite warm flag" 2 '  C cold ↻380k$'
+# expires_at null sits between two populated fields: an empty TSV field would
+# collapse under read's tab IFS and shift recache into the wrong variable.
+OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":false,"caching_observed":true,"expires_at":null,"recache_tokens_if_cold":380000}')")
+assert_line "cold cache shows re-cache token count" 2 '  C cold ↻380k$'
+OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":false,"caching_observed":true,"expires_at":null,"recache_tokens_if_cold":1200000}')")
+assert_line "cold cache formats re-cache over 1M" 2 '  C cold ↻1\.2M$'
+OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":false,"caching_observed":true,"expires_at":null,"recache_tokens_if_cold":null}')")
+assert_line "cold cache without re-cache size shows bare cold" 2 '  C cold$'
+OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":false,"caching_observed":false,"expires_at":null,"recache_tokens_if_cold":null}')")
+assert_line_not "unobserved caching hides cache segment" 2 '  C ([0-9]+m|cold)'
+OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(cost_input 12.4)")
+assert_line_not "absent prompt_cache hides cache segment" 2 '  C ([0-9]+m|cold)'
+# Raw ANSI: the C label stays undimmed like 5h/7d; the warm countdown is dimmed
+# like theirs, and the cold state is blue.
+assert_pcache_raw() {
+  local name="$1" cache_json="$2" expected="$3" raw
+  raw=$(invoke_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input "$cache_json")" | sed -n 2p)
+  if [[ "$raw" == *"$expected"* ]]; then
+    PASS=$((PASS + 1))
+    echo "  PASS: $name"
+  else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL: $name"
+    echo "    expected: $(printf '%q' "$expected")"
+    echo "    actual:   $(printf '%q' "$raw")"
+  fi
+}
+assert_pcache_raw "warm cache: undimmed label, dimmed minutes" \
+  '{"warm":true,"caching_observed":true,"expires_at":'"$((NOW + 2500))"',"recache_tokens_if_cold":380000}' \
+  "  C "$'\033[2m'"42m"$'\033[0m'
+assert_pcache_raw "cold cache: undimmed label, blue state" \
+  '{"warm":false,"caching_observed":true,"expires_at":null,"recache_tokens_if_cold":380000}' \
+  "  C "$'\033[34m'"cold ↻380k"$'\033[0m'
 
 # ── Summary ──
 echo ""
