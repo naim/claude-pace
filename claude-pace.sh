@@ -289,21 +289,22 @@ L2="${BC}${BAR}${N} ${PCT}% ${CL}${PAD2} ${D}|${N}  5h $(_usage "$U5" "$RM5" 300
 printf -v _CS "\$%.2f" "$COST" 2>/dev/null
 [[ "$_CS" != "\$0.00" ]] && L2+="  $_CS"
 # Prompt cache: minutes until the cached prefix goes cold (rounded up, so it never
-# reads 0m while warm), or once cold, the tokens the next request re-caches.
+# reads 0m while warm), or once cold, a blue ↻ with the tokens the next request
+# re-caches (a bare ↻ while that size is unknown, right after a compaction).
 # Expiry is judged from expires_at against the clock, not the warm flag, which is
 # a snapshot from the last event. Hidden until CC has seen caching this session.
 if [[ "$PCO" == "1" ]]; then
   if [[ "$PCX" =~ ^[0-9]+$ ]] && ((PCX > NOW)); then
     L2+="  C ${D}$(((PCX - NOW + 59) / 60))m${N}"
   else
-    _PC="cold"
+    _PC="↻"
     if [[ "$PCR" =~ ^[0-9]+$ ]]; then
       if ((PCR >= 1000000)); then
-        _PC+=" ↻$((PCR / 1000000)).$((PCR % 1000000 / 100000))M"
+        _PC+="$((PCR / 1000000)).$((PCR % 1000000 / 100000))M"
       elif ((PCR >= 1000)); then
-        _PC+=" ↻$((PCR / 1000))k"
+        _PC+="$((PCR / 1000))k"
       else
-        _PC+=" ↻${PCR}"
+        _PC+="${PCR}"
       fi
     fi
     L2+="  C ${B}${_PC}${N}"

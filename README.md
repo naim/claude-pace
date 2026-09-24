@@ -10,7 +10,7 @@ If you are searching for a Claude Code statusline, a Claude Code quota monitor, 
 
 - Claude Code status line with `5h` and `7d` quota usage, reset countdowns, and pace delta
 - Pace-aware rate limit tracking, `⇡15%` means overspending, `⇣15%` means headroom
-- Session cost and prompt cache state, `C 42m` until it goes cold, `C cold ↻380k` once it has
+- Session cost and prompt cache state, `C 42m` until it goes cold, `C ↻380k` once it has
 - Pure Bash + jq, single file, no Node.js runtime and no lockfile churn
 - Install as a Claude Code plugin, with `npx`, or as a single script
 
@@ -20,7 +20,7 @@ Most statuslines show "you used 60%." That number means nothing without context.
 - **⇡15%** red = you're burning 15% faster than sustainable. Slow down.
 - **15%** / **20%** = used in the 5h and 7d windows. **3h** = resets in 3 hours.
 - **$12.40** = session cost, estimated at API list price. On Pro and Max this is not what you are billed.
-- **C 42m** = the prompt cache stays warm for 42 more minutes. **C cold ↻380k** (blue) = it has expired, and your next message re-caches 380k tokens. Requires Claude Code `2.1.251+`.
+- **C 42m** = the prompt cache stays warm for 42 more minutes. **C ↻380k** (blue) = it has expired, and your next message re-caches 380k tokens. Requires Claude Code `2.1.251+`.
 - Top line: model, effort, project `(branch)`, `3f +24 -7` = git diff stats
 
 Claude Code supports custom status lines through its `statusLine` setting and `/statusline` workflow in the official docs:

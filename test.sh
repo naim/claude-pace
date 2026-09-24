@@ -613,19 +613,19 @@ assert_line "warm cache under a minute rounds up to 1m" 2 '  C 1m$'
 # CC re-runs the script at expires_at, but the warm flag in that payload is a
 # snapshot; expiry is judged from expires_at against the clock.
 OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":true,"caching_observed":true,"expires_at":'"$((NOW - 10))"',"recache_tokens_if_cold":380000}')")
-assert_line "expired cache reads cold despite warm flag" 2 '  C cold ↻380k$'
+assert_line "expired cache reads cold despite warm flag" 2 '  C ↻380k$'
 # expires_at null sits between two populated fields: an empty TSV field would
 # collapse under read's tab IFS and shift recache into the wrong variable.
 OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":false,"caching_observed":true,"expires_at":null,"recache_tokens_if_cold":380000}')")
-assert_line "cold cache shows re-cache token count" 2 '  C cold ↻380k$'
+assert_line "cold cache shows re-cache token count" 2 '  C ↻380k$'
 OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":false,"caching_observed":true,"expires_at":null,"recache_tokens_if_cold":1200000}')")
-assert_line "cold cache formats re-cache over 1M" 2 '  C cold ↻1\.2M$'
+assert_line "cold cache formats re-cache over 1M" 2 '  C ↻1\.2M$'
 OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":false,"caching_observed":true,"expires_at":null,"recache_tokens_if_cold":null}')")
-assert_line "cold cache without re-cache size shows bare cold" 2 '  C cold$'
+assert_line "cold cache without re-cache size shows bare arrow" 2 '  C ↻$'
 OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(pcache_input '{"warm":false,"caching_observed":false,"expires_at":null,"recache_tokens_if_cold":null}')")
-assert_line_not "unobserved caching hides cache segment" 2 '  C ([0-9]+m|cold)'
+assert_line_not "unobserved caching hides cache segment" 2 '  C ([0-9]+m|↻)'
 OUTPUT=$(run_with_env "$PCACHE_HOME" "$PCACHE_RUNTIME" "$(cost_input 12.4)")
-assert_line_not "absent prompt_cache hides cache segment" 2 '  C ([0-9]+m|cold)'
+assert_line_not "absent prompt_cache hides cache segment" 2 '  C ([0-9]+m|↻)'
 # Raw ANSI: the C label stays undimmed like 5h/7d; the warm countdown is dimmed
 # like theirs, and the cold state is blue.
 assert_pcache_raw() {
@@ -646,7 +646,7 @@ assert_pcache_raw "warm cache: undimmed label, dimmed minutes" \
   "  C "$'\033[2m'"42m"$'\033[0m'
 assert_pcache_raw "cold cache: undimmed label, blue state" \
   '{"warm":false,"caching_observed":true,"expires_at":null,"recache_tokens_if_cold":380000}' \
-  "  C "$'\033[34m'"cold ↻380k"$'\033[0m'
+  "  C "$'\033[34m'"↻380k"$'\033[0m'
 
 # ── Summary ──
 echo ""
